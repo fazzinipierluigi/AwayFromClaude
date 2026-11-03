@@ -1,7 +1,7 @@
 // Notifiche push sul telefono: tipi di avviso, impostazioni e testi nelle lingue supportate.
 import type { Lingua, Remoto, TipoAvviso } from '../types'
 
-/** Ordine nel pannello: il tasto del tipo è la sua posizione (1–8). */
+/** Ordine nel pannello: il tasto del tipo è la sua posizione (1–9). */
 export const TIPI: { tipo: TipoAvviso; etichetta: string; base: boolean }[] = [
   { tipo: 'permesso', etichetta: 'Permesso richiesto', base: true },
   { tipo: 'domanda', etichetta: 'Domanda di Claude', base: true },
@@ -11,6 +11,7 @@ export const TIPI: { tipo: TipoAvviso; etichetta: string; base: boolean }[] = [
   { tipo: 'limite', etichetta: 'Limite raggiunto', base: true },
   { tipo: 'ripresa', etichetta: 'Sessione ripresa', base: false },
   { tipo: 'errore', etichetta: 'Errore che ferma', base: true },
+  { tipo: 'coda', etichetta: 'Coda completata', base: true },
 ]
 
 /** Un turno conta come "lavoro lungo" da questa durata. */
@@ -62,6 +63,7 @@ const TESTI: Record<Lingua, Testi> = {
     limite: 'Limite raggiunto: {x}',
     ripresa: 'Sessione ripresa dopo il limite',
     errore: 'Lavoro fermato da un errore: {x}',
+    coda: 'Coda di lavoro finita: {x}',
   },
   en: {
     permesso: 'Claude needs a permission: {x}',
@@ -72,6 +74,7 @@ const TESTI: Record<Lingua, Testi> = {
     limite: 'Usage limit reached: {x}',
     ripresa: 'Session resumed after the limit',
     errore: 'Work stopped by an error: {x}',
+    coda: 'Work queue finished: {x}',
   },
   fr: {
     permesso: 'Claude demande une autorisation : {x}',
@@ -82,6 +85,7 @@ const TESTI: Record<Lingua, Testi> = {
     limite: 'Limite atteinte : {x}',
     ripresa: 'Session reprise après la limite',
     errore: 'Travail arrêté par une erreur : {x}',
+    coda: 'File de travail terminée : {x}',
   },
   de: {
     permesso: 'Claude braucht eine Berechtigung: {x}',
@@ -92,6 +96,7 @@ const TESTI: Record<Lingua, Testi> = {
     limite: 'Limit erreicht: {x}',
     ripresa: 'Sitzung nach dem Limit fortgesetzt',
     errore: 'Arbeit durch einen Fehler gestoppt: {x}',
+    coda: 'Arbeitswarteschlange fertig: {x}',
   },
   es: {
     permesso: 'Claude necesita un permiso: {x}',
@@ -102,6 +107,7 @@ const TESTI: Record<Lingua, Testi> = {
     limite: 'Límite alcanzado: {x}',
     ripresa: 'Sesión reanudada tras el límite',
     errore: 'Trabajo detenido por un error: {x}',
+    coda: 'Cola de trabajo terminada: {x}',
   },
   pt: {
     permesso: 'Claude precisa de uma permissão: {x}',
@@ -112,6 +118,7 @@ const TESTI: Record<Lingua, Testi> = {
     limite: 'Limite atingido: {x}',
     ripresa: 'Sessão retomada após o limite',
     errore: 'Trabalho parado por um erro: {x}',
+    coda: 'Fila de trabalho concluída: {x}',
   },
   nl: {
     permesso: 'Claude vraagt toestemming: {x}',
@@ -122,6 +129,7 @@ const TESTI: Record<Lingua, Testi> = {
     limite: 'Limiet bereikt: {x}',
     ripresa: 'Sessie hervat na de limiet',
     errore: 'Werk gestopt door een fout: {x}',
+    coda: 'Werkwachtrij klaar: {x}',
   },
   pl: {
     permesso: 'Claude prosi o zgodę: {x}',
@@ -132,6 +140,7 @@ const TESTI: Record<Lingua, Testi> = {
     limite: 'Osiągnięto limit: {x}',
     ripresa: 'Sesja wznowiona po limicie',
     errore: 'Praca zatrzymana przez błąd: {x}',
+    coda: 'Kolejka zadań zakończona: {x}',
   },
 }
 

@@ -1,77 +1,7 @@
-import { expect, mock, test } from 'claude-code/testing'
-import type { On } from 'claude-code'
+import { expect, test } from 'claude-code/testing'
 
 import { calcolaReset, prossimaLingua, rilevaLingua } from '../hooks/logica'
-
-const ORA = Date.parse('2026-11-02T10:00:00Z')
-const RESET = '2026-11-02T12:00:00Z'
-
-const PANE = {
-  plugin: 'afc',
-  component: 'Pane',
-  requestId: 'afc',
-  props: {
-    title: 'AFC · Away from Claude',
-    isFocused: true,
-    bodyColumns: 44,
-    placement: 'dock',
-    scroll: { offset: 0, bodyRows: 40 },
-    view: {},
-  },
-} as const
-
-const utente = (text: string) => ({ text, wait: false, origin: { kind: 'composer' as const } })
-
-/** Il mondo sotto la mod: clock, store, uso con il limite 5h esaurito, prompt registrati. */
-function motore(on: On, pct = 100) {
-  const clock = mock.clock(on, { now: ORA })
-  mock.store(on)
-  const inviati: string[] = []
-  on('command.register', () => ({ value: { command: 'afc' } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.status', () => ({ value: undefined }))
-  on('ui.toast', () => ({ value: undefined }))
-  on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('classic.StopFailure', () => ({}))
-  on('session.usage', () => ({
-    value: {
-      startedAt: ORA,
-      context: { tokens: 68000, window: 200000, percent: 34 },
-      rateLimits: [
-        { kind: 'five_hour', percentUsed: pct, resetsAt: RESET },
-        { kind: 'seven_day', percentUsed: 58, resetsAt: '2026-11-05T09:00:00Z' },
-      ],
-      cost: { usd: 3.42 },
-    },
-  }))
-  on('prompt.submit', (_, e) => {
-    inviati.push(e.text)
-    return { text: e.text }
-  })
-  // Notifiche: lo strumento PushNotification e le impostazioni del motore che la mod tocca.
-  const push: string[] = []
-  const cfg: Record<string, unknown> = { remoteControl: 'default', agentPushNotifEnabled: false }
-  const comandi: string[] = []
-  on('classic.Notification', () => ({}))
-  on('tool.call', { tool: 'PushNotification' }, (_, e) => {
-    push.push((e as unknown as { message: string }).message)
-    return { result: { message: '', pushSent: true } }
-  })
-  on('tool.call', () => ({ result: {} }))
-  on('config.list', () => ({
-    value: Object.entries(cfg).map(([key, value]) => ({ key, label: key, kind: typeof value === 'boolean' ? 'boolean' : 'choice', value, provider: { plugin: 'engine', tier: 'core' }, isLocked: false })) as never,
-  }))
-  on('config.set', (_, e) => {
-    cfg[e.key] = e.value
-    return { key: e.key, value: e.value }
-  })
-  on('command.list', () => ({ value: [{ name: 'remote-control', description: 'Remote Control' }] as never }))
-  on('command.run', (_, e) => {
-    comandi.push(e.command)
-    return { text: 'ok' }
-  })
-  return { clock, inviati, push, cfg, comandi }
-}
+import { ORA, PANE, motore, utente } from './kit'
 
 test('rileva le lingue principali', () => {
   expect(rilevaLingua('Rendiamo la dashboard più completa, includiamo anche le barre')).toBe('it')

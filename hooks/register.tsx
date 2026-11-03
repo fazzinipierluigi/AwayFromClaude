@@ -1,13 +1,24 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderChildren, Timer } from 'claude-code'
+import type { EngineInterface, HookStream, Register, RenderChildren, Timer } from 'claude-code'
 
-import type { Attesa, Config, Evento, Lingua, Remoto, StatoRemoto, Statistiche, TipoAvviso, UltimaPush, Uso } from '../types'
+import type {
+  Afk, Attesa, Coda, Config, Diario, Evento, Lingua, Rapporto, Remoto, StatoRemoto, Statistiche, Sveglia, TipoAvviso,
+  UltimaPush, Uso, VoceCoda,
+} from '../types'
 import {
   CONFIG_BASE, NOME_LINGUA, PAROLA, STATS_VUOTE, attesaMedia, blocchiSettimana, calcolaReset, clampMargine,
   conBlocco, conRipresa, configValida, daMotore, durataBreve, giorno, hms, linguaEffettiva, nomeLimite,
   orario, prossimaLingua, quandoReset, rilevaLingua, riprendiAlle, statsValide, token,
 } from './logica'
 import { LAVORO_LUNGO_MS, MOTIVO, REMOTO_BASE, TIPI, domandaDa, eRipetizione, remotoValido, testoPush } from './avvisi'
+import { valuta } from './politica'
+import type { Extra } from './politica'
+import {
+  MAX_SOLLECITI, checkbox, marcatori, nuovoId, percorsoPiano, promptContinua, promptEsegui, promptPianifica,
+  sembraPiano, superpowersDisponibile,
+} from './coda'
+import { NOME_SISTEMA, argvSveglia } from './sveglia'
+import type { Sistema } from './sveglia'
 
 const PANE = 'afc'
 const TITOLO = 'AFC · Away from Claude'
@@ -23,9 +34,17 @@ const attesa = atom({ plugin: 'afc', key: 'attesa' } as const, null as Attesa | 
 const evento = atom({ plugin: 'afc', key: 'evento' } as const, null as Evento | null, { shape: 'evento-1' })
 const stats = atom({ plugin: 'afc', key: 'stats' } as const, STATS_VUOTE as Statistiche, { shape: 'stats-2' })
 const ora = atom({ plugin: 'afc', key: 'ora' } as const, 0, { shape: 'ora-1' })
-const remoto = atom({ plugin: 'afc', key: 'remoto' } as const, REMOTO_BASE as Remoto, { shape: 'remoto-1' })
+const remoto = atom({ plugin: 'afc', key: 'remoto' } as const, REMOTO_BASE as Remoto, { shape: 'remoto-2' })
 const ultimaPush = atom({ plugin: 'afc', key: 'ultimaPush' } as const, null as UltimaPush | null, { shape: 'push-1' })
 const statoRemoto = atom({ plugin: 'afc', key: 'statoRemoto' } as const, null as StatoRemoto | null, { shape: 'stato-remoto-1' })
+const afk = atom({ plugin: 'afc', key: 'afk' } as const, { attivo: false } as Afk, { shape: 'afk-1' })
+const sveglia = atom({ plugin: 'afc', key: 'sveglia' } as const, { stato: 'spenta' } as Sveglia, { shape: 'sveglia-1' })
+const coda = atom({ plugin: 'afc', key: 'coda' } as const, { voci: [], inCorso: false } as Coda, { shape: 'coda-1' })
+const DIARIO_VUOTO: Diario = { da: 0, strumenti: 0, file: [], negati: [], errori: [], limiti: 0, riprese: 0, push: 0, completati: [], interrotti: [] }
+const diario = atom({ plugin: 'afc', key: 'diario' } as const, DIARIO_VUOTO, { shape: 'diario-1' })
+const rapporto = atom({ plugin: 'afc', key: 'rapporto' } as const, null as Rapporto | null, { shape: 'rapporto-1' })
+const inTurno = atom({ plugin: 'afc', key: 'inTurno' } as const, false, { shape: 'in-turno-1' })
+const ultimaAttivita = atom({ plugin: 'afc', key: 'ultimaAttivita' } as const, 0, { shape: 'attivita-1' })
 
 // In $.store: valgono anche nelle sessioni dopo. Gli atom ne sono la copia che ridisegna.
 const K_CONFIG = 'config'
@@ -52,9 +71,18 @@ const C = {
 
 const colorePct = (p: number) => (p >= 90 ? C.errore : p >= 70 ? C.attenzione : C.ok)
 
-// Il timer vive nel modulo: a ogni ricarica si riprogramma da `attesa`, che sta in $.state.
+// Vivono nel modulo: a ogni ricarica si ricostruiscono da $.state e $.store.
 let timer: Timer | undefined
 let tentativi = 0
+let svegliaFlusso: HookStream<unknown, unknown> | undefined
+let radice = ''
+let sistema: Sistema | undefined
+let superpowers = false
+let extra: Extra = { ammessi: '', negati: '' }
+let spegniDopoMs = 30 * 60 * 1000
+
+const normale = (p: string) => p.replace(/\\/g, '/').toLowerCase()
+const chiaveCoda = () => `coda:${normale(radice)}`
 
 async function caricaDalloStore($: EngineInterface) {
   const c = configValida(await $.store.get(K_CONFIG).catch(() => undefined))
@@ -65,6 +93,10 @@ async function caricaDalloStore($: EngineInterface) {
   await update($, stats, () => s)
   await update($, remoto, () => r)
   if (typeof l === 'string' && l in PAROLA) await update($, linguaRilevata, () => l as Lingua)
+  // La coda è del progetto. Un compito rimasto "in esecuzione" da una sessione chiusa torna pronto.
+  const v = await $.store.get(chiaveCoda()).catch(() => undefined)
+  const voci = v && typeof v === 'object' && Array.isArray((v as Coda).voci) ? (v as Coda).voci : []
+  await update($, coda, () => ({ inCorso: false, voci: voci.map(x => (x.stato === 'esecuzione' ? { ...x, stato: 'pronto' as const } : x)) }))
 }
 
 async function impostaConfig($: EngineInterface, fn: (c: Config) => Config) {
@@ -86,8 +118,28 @@ async function impostaRemoto($: EngineInterface, fn: (r: Remoto) => Remoto) {
   await $.store.set(K_REMOTO, r)
 }
 
+async function impostaCoda($: EngineInterface, fn: (c: Coda) => Coda) {
+  const c = fn(await read($, coda))
+  await update($, coda, () => c)
+  await $.store.set(chiaveCoda(), c)
+}
+
+const segna = ($: EngineInterface, fn: (d: Diario) => Diario) => update($, diario, fn)
+
+async function attivita($: EngineInterface) {
+  const t = await $.clock.now()
+  await update($, ultimaAttivita, () => t)
+}
+
 async function lingua($: EngineInterface): Promise<Lingua> {
   return linguaEffettiva(await read($, config), await read($, linguaRilevata))
+}
+
+/** Un prompt alla sessione fuori dalla dispatch corrente: la sessione lo prende appena è libera. */
+function invia($: EngineInterface, testo: string) {
+  $.clock.after(0, () => {
+    void $.prompt.submit({ text: testo }).catch(err => $.ui.log(`afc: prompt non inviato: ${String(err)}`))
+  })
 }
 
 async function leggiUso($: EngineInterface) {
@@ -126,7 +178,10 @@ async function avvisa($: EngineInterface, tipo: TipoAvviso, dettaglio = '') {
     const esito: UltimaPush['esito'] = v.pushSent ? 'inviata' : v.localSent ? 'locale' : 'saltata'
     const motivo = out.isError ? (out.text ?? 'errore') : v.disabledReason ? (MOTIVO[v.disabledReason] ?? v.disabledReason) : undefined
     await update($, ultimaPush, () => ({ quando: adesso, tipo, testo, esito, ...(motivo ? { motivo } : {}) }))
-    if (esito === 'inviata') await impostaStats($, s => ({ ...s, pushInviate: s.pushInviate + 1 }))
+    if (esito === 'inviata') {
+      await impostaStats($, s => ({ ...s, pushInviate: s.pushInviate + 1 }))
+      await segna($, d => ({ ...d, push: d.push + 1 }))
+    }
   } catch (err) {
     const adesso = await $.clock.now()
     await update($, ultimaPush, u => ({ quando: adesso, tipo, testo: u?.testo ?? tipo, esito: 'saltata' as const, motivo: String(err) }))
@@ -196,6 +251,266 @@ async function spegniRemoto($: EngineInterface) {
   $.ui.toast('AFC: notifiche spente.')
 }
 
+// ── Modalità AFK: sveglia e permessi ────────────────────────────────────
+
+async function rilevaSistema($: EngineInterface): Promise<Sistema> {
+  if (sistema) return sistema
+  const os = await $.env.get('OS').catch(() => undefined)
+  if (os === 'Windows_NT') return (sistema = 'windows')
+  try {
+    const { stdout } = await $.process.run(['uname', '-s'], { timeoutMs: 5000 })
+    sistema = /darwin/i.test(stdout) ? 'mac' : /linux/i.test(stdout) ? 'linux' : 'altro'
+  } catch {
+    sistema = 'altro'
+  }
+  return sistema
+}
+
+/** Avvia il processo che tiene sveglio il PC; vive finché la mod non lo chiude. */
+async function accendiSveglia($: EngineInterface) {
+  if (svegliaFlusso) return
+  const s = await rilevaSistema($)
+  const argv = argvSveglia(s)
+  const adesso = await $.clock.now()
+  if (!argv) {
+    await update($, sveglia, () => ({ stato: 'non supportata' as const, testo: NOME_SISTEMA[s] }))
+    return
+  }
+  let flusso: HookStream<unknown, unknown>
+  try {
+    flusso = $.process.spawn({ argv }) as HookStream<unknown, unknown>
+  } catch (err) {
+    await update($, sveglia, () => ({ stato: 'errore' as const, testo: String(err) }))
+    return
+  }
+  svegliaFlusso = flusso
+  await update($, sveglia, () => ({ stato: 'attiva' as const, da: adesso, testo: NOME_SISTEMA[s] }))
+  void (async () => {
+    let motivo = 'il processo è terminato'
+    try {
+      for await (const pezzo of flusso) {
+        const p = pezzo as { stream?: string; text?: string }
+        // PowerShell apre lo stderr con un'intestazione CLIXML che non è un errore.
+        const t = p.text?.replace(/#< CLIXML\s*/g, '').trim()
+        if (p.stream === 'stderr' && t) motivo = t.slice(0, 120)
+      }
+    } catch (err) {
+      motivo = String(err)
+    }
+    // Finito da solo, non chiuso da noi: lo si dice nel pannello.
+    if (svegliaFlusso === flusso) {
+      svegliaFlusso = undefined
+      await update($, sveglia, () => ({ stato: 'errore' as const, testo: motivo }))
+    }
+  })()
+}
+
+async function spegniSveglia($: EngineInterface, testo?: string) {
+  const f = svegliaFlusso
+  svegliaFlusso = undefined
+  await f?.return(undefined).catch(() => undefined)
+  await update($, sveglia, () => ({ stato: 'spenta' as const, ...(testo ? { testo } : {}) }))
+}
+
+async function nuovoDiario($: EngineInterface): Promise<Diario> {
+  const da = await $.clock.now()
+  const costo = (await read($, uso)).costoUsd
+  return { ...DIARIO_VUOTO, da, ...(costo !== undefined ? { costoInizio: costo } : {}) }
+}
+
+async function impostaAfk($: EngineInterface, attivo: boolean) {
+  if (attivo) {
+    const d = await nuovoDiario($)
+    await update($, afk, () => ({ attivo: true, da: d.da }))
+    await update($, diario, () => d)
+    await attivita($)
+    await accendiSveglia($)
+    $.ui.toast('AFC: modalità AFK accesa. PC sveglio, permessi AFK attivi.')
+  } else {
+    await update($, afk, () => ({ attivo: false }))
+    await spegniSveglia($)
+    $.ui.toast('AFC: modalità AFK spenta.')
+  }
+}
+
+/** Ogni minuto: la sveglia si spegne da sola se non c'è niente da fare da un po'. */
+async function controllaInattivita($: EngineInterface) {
+  const k = await read($, afk)
+  if (!k.attivo || !svegliaFlusso) return
+  if (await read($, inTurno)) return
+  if ((await read($, coda)).inCorso) return
+  if (await read($, attesa)) return
+  const adesso = await $.clock.now()
+  if (adesso - (await read($, ultimaAttivita)) > spegniDopoMs) {
+    await spegniSveglia($, `spenta alle ${orario(adesso)}: nessuna attività da ${Math.round(spegniDopoMs / 60000)} min`)
+  }
+}
+
+const descriviChiamata = (tool: string, input: unknown) => {
+  const i = (input ?? {}) as { command?: unknown; file_path?: unknown }
+  const cosa = typeof i.command === 'string' ? i.command : typeof i.file_path === 'string' ? i.file_path : ''
+  return cosa ? `${tool}: ${cosa.replace(/\s+/g, ' ').slice(0, 120)}` : tool
+}
+
+// ── Coda di lavoro ──────────────────────────────────────────────────────
+
+async function aggiornaSuperpowers($: EngineInterface) {
+  try {
+    superpowers = superpowersDisponibile((await $.command.list()).map(c => c.name))
+  } catch { /* senza elenco: flusso interno */ }
+}
+
+/** Un nuovo obiettivo: si pianifica adesso, con l'utente presente. */
+async function aggiungi($: EngineInterface, testo: string) {
+  const obiettivo = testo.trim()
+  if (!obiettivo) return
+  await aggiornaSuperpowers($)
+  const adesso = await $.clock.now()
+  const via: VoceCoda['via'] = superpowers ? 'superpowers' : 'interno'
+  const voci = (await read($, coda)).voci
+  const percorso = percorsoPiano(obiettivo, adesso)
+  const voce: VoceCoda = {
+    id: nuovoId(adesso, voci.length), obiettivo, stato: 'pianificazione', via, aggiunta: adesso, solleciti: 0,
+    ...(via === 'interno' ? { piano: percorso } : {}),
+  }
+  await impostaCoda($, c => ({ ...c, voci: [...c.voci, voce] }))
+  invia($, promptPianifica(via, obiettivo, percorso))
+  $.ui.toast(`AFC: pianifichiamo "${obiettivo.slice(0, 40)}" adesso, poi va in coda.`)
+}
+
+async function cambiaVoce($: EngineInterface, id: string, fn: (v: VoceCoda) => VoceCoda) {
+  await impostaCoda($, c => ({ ...c, voci: c.voci.map(v => (v.id === id ? fn(v) : v)) }))
+}
+
+/** Il primo piano pronto parte; se non ce ne sono la coda si ferma. */
+async function avviaProssimo($: EngineInterface) {
+  const c = await read($, coda)
+  if (!c.inCorso) return
+  if (c.voci.some(v => v.stato === 'esecuzione')) return
+  const v = c.voci.find(x => x.stato === 'pronto' && x.piano)
+  if (!v || !v.piano) {
+    await impostaCoda($, x => ({ ...x, inCorso: false }))
+    const fatte = c.voci.filter(x => x.stato === 'fatto').length
+    const interrotte = c.voci.filter(x => x.stato === 'interrotto').length
+    $.ui.toast('AFC: coda di lavoro finita.')
+    void avvisa($, 'coda', `${fatte} fatti${interrotte ? `, ${interrotte} interrotti` : ''}`)
+    return
+  }
+  const adesso = await $.clock.now()
+  await cambiaVoce($, v.id, x => ({ ...x, stato: 'esecuzione', inizio: adesso, solleciti: 0 }))
+  await attivita($)
+  invia($, promptEsegui(v.via, v.piano, v.obiettivo))
+}
+
+async function avviaCoda($: EngineInterface) {
+  await impostaCoda($, c => ({ ...c, inCorso: true }))
+  await avviaProssimo($)
+}
+
+async function fermaCoda($: EngineInterface) {
+  await impostaCoda($, c => ({ ...c, inCorso: false }))
+  $.ui.toast('AFC: la coda si ferma dopo il compito in corso.')
+}
+
+/** Fine di un turno della sessione principale: avanza la pianificazione o l'esecuzione. */
+async function avanzaCoda($: EngineInterface, risposta: string) {
+  const c = await read($, coda)
+  const m = marcatori(risposta)
+  const adesso = await $.clock.now()
+
+  const inPiano = c.voci.find(v => v.stato === 'pianificazione')
+  if (inPiano && (m.piano || (inPiano.piano && !/\?\s*$/.test(risposta.trim())))) {
+    const piano = m.piano ?? inPiano.piano
+    const testo = piano ? await $.fs.read(piano).catch(() => '') : ''
+    if (piano && testo && sembraPiano(piano, testo)) {
+      await cambiaVoce($, inPiano.id, v => ({ ...v, stato: 'pronto', piano }))
+      $.ui.toast(`AFC: piano pronto in coda (${piano}).`)
+    }
+  }
+
+  const inCorso = c.voci.find(v => v.stato === 'esecuzione')
+  if (!inCorso || !inCorso.piano) return
+  const cb = checkbox(await $.fs.read(inCorso.piano).catch(() => ''))
+  const completo = m.fatto || (cb.totali > 0 && cb.fatte === cb.totali && inCorso.via === 'interno')
+  if (completo) {
+    await cambiaVoce($, inCorso.id, v => ({ ...v, stato: 'fatto', fine: adesso }))
+    await segna($, d => ({ ...d, completati: [...d.completati, inCorso.obiettivo] }))
+    await avviaProssimo($)
+  } else if (m.bloccato) {
+    await cambiaVoce($, inCorso.id, v => ({ ...v, stato: 'interrotto', fine: adesso, nota: m.bloccato }))
+    await segna($, d => ({ ...d, interrotti: [...d.interrotti, `${inCorso.obiettivo}: ${m.bloccato}`] }))
+    await avviaProssimo($)
+  } else if (inCorso.solleciti < MAX_SOLLECITI) {
+    await cambiaVoce($, inCorso.id, v => ({ ...v, solleciti: v.solleciti + 1 }))
+    invia($, promptContinua(inCorso.piano))
+  } else {
+    const nota = `nessun segnale di fine dopo ${MAX_SOLLECITI} solleciti`
+    await cambiaVoce($, inCorso.id, v => ({ ...v, stato: 'interrotto', fine: adesso, nota }))
+    await segna($, d => ({ ...d, interrotti: [...d.interrotti, `${inCorso.obiettivo}: ${nota}`] }))
+    await avviaProssimo($)
+  }
+}
+
+// ── Rapporto di rientro ─────────────────────────────────────────────────
+
+const NOME_LINGUA_INGLESE: Record<Lingua, string> = {
+  it: 'Italian', en: 'English', fr: 'French', de: 'German', es: 'Spanish', pt: 'Portuguese', nl: 'Dutch', pl: 'Polish',
+}
+
+async function generaRapporto($: EngineInterface) {
+  const adesso = await $.clock.now()
+  if ((await read($, rapporto))?.stato === 'preparazione') return
+  await update($, rapporto, () => ({ stato: 'preparazione' as const, quando: adesso }))
+  try {
+    await leggiUso($)
+    const d = await read($, diario)
+    const u = await read($, uso)
+    const voci = (await read($, coda)).voci
+    const da = d.da || adesso
+    const righe: string[] = [
+      `## Rapporto di rientro AFC`,
+      ``,
+      `Dalle ${orario(da)} alle ${orario(adesso)} (${durataBreve(adesso - da)}).`,
+      ``,
+    ]
+    const elenco = (titolo: string, xs: string[], max = 10) => {
+      if (!xs.length) return
+      righe.push(`**${titolo}** (${xs.length})`)
+      for (const x of xs.slice(0, max)) righe.push(`- ${x}`)
+      if (xs.length > max) righe.push(`- … e altri ${xs.length - max}`)
+      righe.push('')
+    }
+    elenco('Compiti completati', d.completati)
+    elenco('Compiti interrotti', d.interrotti)
+    const ancora = voci.filter(v => v.stato === 'pronto' || v.stato === 'esecuzione').map(v => v.obiettivo)
+    elenco('Ancora in coda', ancora)
+    elenco('File modificati', d.file)
+    elenco('Comandi negati dai permessi AFK', d.negati.map(n => `${orario(n.quando)} ${n.cosa} — ${n.motivo}`), 8)
+    elenco('Errori', d.errori.map(e => `${orario(e.quando)} ${e.testo}`), 8)
+    const costo = u.costoUsd !== undefined ? u.costoUsd - (d.costoInizio ?? 0) : undefined
+    righe.push(`Limiti raggiunti: ${d.limiti} · riprese automatiche: ${d.riprese} · notifiche: ${d.push} · chiamate a strumenti: ${d.strumenti}${costo !== undefined ? ` · costo: $${costo.toFixed(2)}` : ''}`)
+
+    const l = await lingua($)
+    const f = await $.model.fork({
+      prompt: [
+        `Write a short return report for the user, who was away from the PC since ${orario(da)}.`,
+        `Answer in ${NOME_LINGUA_INGLESE[l]}, in Markdown, at most 15 lines, no preamble.`,
+        'Cover: what was done, decisions taken on your own, open problems, what the user should check or do next.',
+        'Base it only on this conversation since that time.',
+      ].join(' '),
+    })
+    if (f.isAnswered && 'text' in f) righe.push('', '### Riassunto di Claude', '', f.text.trim())
+    else righe.push('', `_Riassunto di Claude non disponibile (${f.isAnswered ? 'risposta vuota' : f.reason})._`)
+
+    const testo = righe.join('\n')
+    await $.session.append({ message: { type: 'system', content: [{ type: 'text', text: testo }] } })
+    await update($, rapporto, () => ({ stato: 'pronto' as const, quando: adesso }))
+    $.ui.toast('AFC: rapporto di rientro pronto in chat.')
+  } catch (err) {
+    await update($, rapporto, () => ({ stato: 'errore' as const, quando: adesso, testo: String(err) }))
+  }
+}
+
 // ── Auto-Resume ─────────────────────────────────────────────────────────
 
 /** Riprogramma (o cancella) il timer di ripresa secondo `attesa` e `config`. */
@@ -228,7 +543,10 @@ async function blocco($: EngineInterface) {
     return
   }
   // Un nuovo blocco mentre si attende già (o subito dopo una ripresa fallita) conta una volta.
-  if (!prima) await impostaStats($, s => conBlocco(s, adesso))
+  if (!prima) {
+    await impostaStats($, s => conBlocco(s, adesso))
+    await segna($, d => ({ ...d, limiti: d.limiti + 1 }))
+  }
   await update($, attesa, () => ({ ...r, da: prima?.da ?? adesso }))
   await update($, ora, () => adesso)
   await programma($)
@@ -259,6 +577,7 @@ async function riprendi($: EngineInterface) {
       return
     }
     await impostaStats($, s => conRipresa(s, adesso, adesso - a.da))
+    await segna($, d => ({ ...d, riprese: d.riprese + 1 }))
     await update($, evento, () => ({ quando: adesso, tipo: 'ripresa' as const, testo: `inviato "${testo}"` }))
     $.ui.toast(`AFC: inviato "${testo}".`)
     void avvisa($, 'ripresa')
@@ -285,16 +604,35 @@ const daUtente = (o: { kind: string } | undefined) => o === undefined || o.kind 
 /** La prima frase di una risposta, per la push "lavoro finito". */
 const primaFrase = (s: string) => s.replace(/[#*`>_]/g, '').replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s/)[0] ?? ''
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  extra = {
+    ammessi: typeof options.afkAmmessi === 'string' ? options.afkAmmessi : '',
+    negati: typeof options.afkNegati === 'string' ? options.afkNegati : '',
+  }
+  if (typeof options.afkSpegniDopoMin === 'number' && options.afkSpegniDopoMin > 0) spegniDopoMs = options.afkSpegniDopoMin * 60000
+
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'afc', description: 'Apre il pannello AFC · Away from Claude: auto-resume, controllo remoto, notifiche, limiti e statistiche' })
+    await $.command.register({ name: 'afc', description: 'Apre il pannello AFC · Away from Claude: modalità AFK, coda di lavoro, auto-resume, notifiche, limiti' })
     void $.ui.open({ id: PANE, title: TITOLO })
+    radice = await $.session.root().catch(() => e.cwd)
     await caricaDalloStore($)
     await leggiUso($)
+    await aggiornaSuperpowers($)
+    if (!(await read($, diario)).da) {
+      const d = await nuovoDiario($)
+      await update($, diario, () => d)
+    }
+    // Una ricarica perde il processo della sveglia: se la modalità AFK era accesa, riparte.
+    if ((await read($, afk)).attivo && (await read($, sveglia)).stato === 'attiva') {
+      await update($, sveglia, () => ({ stato: 'spenta' as const }))
+      await accendiSveglia($)
+    }
     // Un'attesa scaduta mentre il modulo non c'era si riprende subito; una ricarica riprogramma il timer.
     await programma($)
     await segnaOra($)
+    await attivita($)
     $.clock.every(OGNI_MS, () => void segnaOra($))
+    $.clock.every(60000, () => void controllaInattivita($))
     return next(e)
   })
 
@@ -308,12 +646,16 @@ export const register: Register = on => {
   on('classic.StopFailure', async ($, e, next) => {
     if (!e.agent_id) {
       if (e.error === 'rate_limit') await blocco($)
-      else void avvisa($, 'errore', e.error_details || e.error)
+      else {
+        const t = await $.clock.now()
+        await segna($, d => ({ ...d, errori: [...d.errori, { quando: t, testo: e.error_details || e.error }].slice(-30) }))
+        void avvisa($, 'errore', e.error_details || e.error)
+      }
     }
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // Le notifiche del motore: un permesso da dare, Claude che aspetta, un dialogo di domanda.
+  // Le notifiche del motore: Claude che aspetta, un dialogo di domanda. I permessi li vede `tool.check`.
   on('classic.Notification', async ($, e, next) => {
     if (!e.agent_id) {
       if (e.notification_type === 'permission_prompt') void avvisa($, 'permesso', e.message)
@@ -322,6 +664,25 @@ export const register: Register = on => {
     }
     return next(e)
   }).catch(($, e, next) => next(e))
+
+  // Permessi: in modalità AFK la politica della mod; sempre, un "ask" che arriva all'utente manda la push.
+  on('tool.check', async ($, e, next) => {
+    const r = await next(e)
+    const k = await read($, afk)
+    if (k.attivo && r.decision !== 'deny') {
+      const v = valuta(e.tool, e.input, radice, e.isReadOnly === true, extra)
+      if (v.decisione === 'deny') {
+        const t = await $.clock.now()
+        await segna($, d => ({ ...d, negati: [...d.negati, { quando: t, cosa: descriviChiamata(e.tool, e.input), motivo: v.motivo ?? '' }].slice(-50) }))
+        return { ...r, decision: 'deny' as const, reason: `AFC, modalità AFK: ${v.motivo}. L'utente è via dal PC: trova un'altra strada o lascia questo passo per il suo rientro, annotandolo.` }
+      }
+      if (v.decisione === 'allow' && r.decision === 'ask') return { ...r, decision: 'allow' as const, reason: `AFC, modalità AFK: ${v.motivo}` }
+    }
+    if (r.decision === 'ask' && e.tool_use_id && e.tool !== 'AskUserQuestion' && e.tool !== 'ExitPlanMode') {
+      void avvisa($, 'permesso', descriviChiamata(e.tool, e.input))
+    }
+    return r
+  })
 
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     void avvisa($, 'domanda', domandaDa(e))
@@ -333,11 +694,43 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  // Ogni chiamata: attività, diario, e il file del piano mentre un compito si pianifica.
+  on('tool.call', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      if (e.tool === 'PushNotification') return r
+      await attivita($)
+      await segna($, d => ({ ...d, strumenti: d.strumenti + 1 }))
+      const f = (e as unknown as { file_path?: unknown }).file_path
+      const ok = !(r as { isError?: boolean }).isError
+      if (ok && typeof f === 'string' && ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(e.tool)) {
+        await segna($, d => (d.file.includes(f) ? d : { ...d, file: [...d.file, f].slice(-200) }))
+        const inPiano = (await read($, coda)).voci.find(v => v.stato === 'pianificazione')
+        if (inPiano && /\.md$/i.test(f)) {
+          const testo = await $.fs.read(f).catch(() => '')
+          if (sembraPiano(f, testo)) await cambiaVoce($, inPiano.id, v => ({ ...v, piano: f }))
+        }
+      }
+    } catch { /* il diario non deve mai disturbare la chiamata */ }
+    return r
+  }).catch(($, e, next) => next(e))
+
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      await update($, inTurno, () => true)
+      await attivita($)
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
+      await update($, inTurno, () => false)
+      await attivita($)
       if (e.reason === 'answer') {
         tentativi = 0
         if (e.durationMs >= LAVORO_LUNGO_MS) void avvisa($, 'finito', primaFrase(e.answer))
+        await avanzaCoda($, e.answer)
       }
       // Rete di sicurezza: turno morto su errore con una finestra esaurita.
       if (e.reason === 'error' && !(await read($, attesa))) {
@@ -363,6 +756,11 @@ export const register: Register = on => {
 
   on('session.measure', async ($, e, next) => {
     await registraUso($, e)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('session.end', async ($, e, next) => {
+    await spegniSveglia($)
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -394,6 +792,11 @@ export const register: Register = on => {
     const rm = await read($, remoto)
     const up = await read($, ultimaPush)
     const sr = await read($, statoRemoto)
+    const k = await read($, afk)
+    const sv = await read($, sveglia)
+    const cd = await read($, coda)
+    const di = await read($, diario)
+    const rp = await read($, rapporto)
     const adesso = (await read($, ora)) || (await $.clock.now())
     const lin = linguaEffettiva(c, rilevata)
 
@@ -440,6 +843,104 @@ export const register: Register = on => {
 
     // ── Intestazione ──
     const testata = riga(<Text color={C.accento} bold>✈ AFC · Away from Claude</Text>, null, W)
+
+    // ── Modalità AFK ──
+    const afkFigli: RenderChildren[] = [
+      riga(
+        <Button key="afk" plain hotkey="k" label={`[${k.attivo ? '✓' : ' '}] Modalità AFK (PC sveglio + permessi AFK)`}
+          onPress={() => void impostaAfk($, !k.attivo)} />,
+        null,
+      ),
+    ]
+    if (k.attivo || sv.stato !== 'spenta' || sv.testo) {
+      const sveg = sv.stato === 'attiva'
+        ? <Text color={C.ok} wrap="truncate">☕ PC sveglio dalle {orario(sv.da ?? adesso)} ({sv.testo})</Text>
+        : sv.stato === 'errore'
+          ? <Text color={C.errore} wrap="truncate">☕ sveglia non attiva: {sv.testo}</Text>
+          : sv.stato === 'non supportata'
+            ? <Text color={C.attenzione} wrap="truncate">☕ sveglia non disponibile su {sv.testo}</Text>
+            : <Text color={C.dim} wrap="truncate">☕ {sv.testo ?? 'sveglia spenta'}</Text>
+      afkFigli.push(sveg)
+    }
+    afkFigli.push(<Text color={C.dim} wrap="truncate">{k.attivo ? '🔒 ammessi test, build, lint, git locale · negati push, deploy, cancellazioni' : 'Accendila prima di andare via.'}</Text>)
+    if (di.negati.length) {
+      const ultimo = di.negati[di.negati.length - 1]
+      afkFigli.push(<Text color={C.attenzione} wrap="truncate">⛔ negati {di.negati.length} · ultimo: {ultimo?.cosa} ({ultimo?.motivo})</Text>)
+    }
+    afkFigli.push(riga(
+      <Button key="rapporto" plain hotkey="g" label="📋 Rapporto di rientro" onPress={() => void generaRapporto($)} />,
+      rp
+        ? <Text color={rp.stato === 'errore' ? C.errore : rp.stato === 'pronto' ? C.ok : C.attenzione}>
+            {rp.stato === 'preparazione' ? 'in preparazione…' : rp.stato === 'pronto' ? `pronto in chat · ${orario(rp.quando)}` : 'non riuscito'}
+          </Text>
+        : <Text color={C.dim}>dalle {orario(di.da || adesso)}</Text>,
+    ))
+    if (rp?.stato === 'errore' && rp.testo) afkFigli.push(<Text color={C.errore} wrap="truncate">{rp.testo}</Text>)
+    const coloreAfk = k.attivo ? C.viola : C.tenue
+
+    // ── Coda di lavoro ──
+    const ICONA: Record<VoceCoda['stato'], [string, string]> = {
+      pianificazione: ['✎', C.info],
+      pronto: ['●', C.testo],
+      esecuzione: ['▶', C.attenzione],
+      fatto: ['✓', C.ok],
+      interrotto: ['✕', C.errore],
+    }
+    const pronti = cd.voci.filter(v => v.stato === 'pronto').length
+    const codaFigli: RenderChildren[] = []
+    if ('Input' in els) {
+      codaFigli.push(
+        <Box width={dentro} overflow="hidden" flexDirection="column">
+          <els.Input key="obiettivo" rows={2} placeholder="Nuovo obiettivo: lo pianifichiamo adesso, poi va in coda" submitLabel="pianifica"
+            onSubmit={(v: string) => void aggiungi($, v)} />
+        </Box>,
+      )
+    } else {
+      codaFigli.push(<Text color={C.dim}>Qui non c'è un campo di testo.</Text>)
+    }
+    codaFigli.push(<Text color={C.dim} wrap="truncate">flusso: {superpowers ? 'superpowers (brainstorming + writing-plans, poi subagent-driven)' : 'piano interno in docs/plans'}</Text>)
+    if (!cd.voci.length) codaFigli.push(<Text color={C.dim}>Coda vuota.</Text>)
+    cd.voci.forEach((v, i) => {
+      const [icona, col] = ICONA[v.stato]
+      codaFigli.push(
+        <Box flexDirection="column" width={dentro}>
+          {riga(
+            <Text color={col} wrap="truncate">{icona} {v.obiettivo}</Text>,
+            <Box columnGap={1}>
+              {i > 0 && v.stato !== 'esecuzione' && (
+                <Button key={`su-${v.id}`} plain dimColor label="↑"
+                  onPress={() => void impostaCoda($, x => {
+                    const vs = x.voci.slice()
+                    const j = vs.findIndex(y => y.id === v.id)
+                    if (j > 0) { const t = vs[j - 1] as VoceCoda; vs[j - 1] = vs[j] as VoceCoda; vs[j] = t }
+                    return { ...x, voci: vs }
+                  })} />
+              )}
+              {v.stato !== 'esecuzione' && (
+                <Button key={`via-${v.id}`} plain dimColor label="✕"
+                  onPress={() => void impostaCoda($, x => ({ ...x, voci: x.voci.filter(y => y.id !== v.id) }))} />
+              )}
+            </Box>,
+          )}
+          <Box paddingLeft={2}>
+            <Text color={C.dim} wrap="truncate">
+              {v.stato === 'pianificazione' ? `in pianificazione con te${v.piano ? ` · ${v.piano}` : ''}`
+                : v.stato === 'esecuzione' ? `in esecuzione da ${durataBreve(adesso - (v.inizio ?? adesso))}${v.solleciti ? ` · sollecito ${v.solleciti}/${MAX_SOLLECITI}` : ''}`
+                  : v.nota ?? v.piano ?? ''}
+            </Text>
+          </Box>
+        </Box>,
+      )
+    })
+    codaFigli.push(riga(
+      cd.inCorso
+        ? <Button key="coda" plain hotkey="v" label="⏸ ferma dopo il compito in corso" onPress={() => void fermaCoda($)} />
+        : <Button key="coda" plain hotkey="v" dimColor={pronti === 0} label={`▶ avvia coda (${pronti} pront${pronti === 1 ? 'o' : 'i'})`} onPress={() => void avviaCoda($)} />,
+      cd.voci.some(v => v.stato === 'fatto' || v.stato === 'interrotto')
+        ? <Button key="pulisci" plain dimColor label="pulisci finiti" onPress={() => void impostaCoda($, x => ({ ...x, voci: x.voci.filter(y => y.stato !== 'fatto' && y.stato !== 'interrotto') }))} />
+        : null,
+    ))
+    const coloreCoda = cd.inCorso ? C.attenzione : C.tenue
 
     // ── Auto-Resume ──
     const statoFigli: RenderChildren[] = []
@@ -577,6 +1078,8 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" width={W}>
         {testata}
+        {card(riga(<Text color={coloreAfk} bold>Modalità AFK</Text>, spia(k.attivo)), coloreAfk, afkFigli, k.attivo)}
+        {card(riga(<Text color={coloreCoda} bold>Coda di lavoro</Text>, <Text color={C.dim}>{cd.voci.length ? `${cd.voci.filter(v => v.stato === 'fatto').length}/${cd.voci.length}` : ''}</Text>), coloreCoda, codaFigli, cd.inCorso)}
         {card(riga(<Text color={coloreStato} bold>Auto-Resume</Text>, spia(c.attivo)), coloreStato, statoFigli)}
         {card(riga(<Text color={rm.attivo ? C.info : C.tenue} bold>Remoto e notifiche</Text>, spia(rm.attivo)), rm.attivo ? C.info : C.tenue, remotoFigli, rm.attivo)}
         {card('Limiti', C.tenue, limitiFigli, false)}

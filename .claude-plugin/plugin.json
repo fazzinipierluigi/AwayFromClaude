@@ -1,12 +1,32 @@
 {
   "name": "afc",
-  "version": "0.2.0",
-  "description": "Away from Claude (AFC): tools to develop while away from the PC. Auto-resumes the session when a usage limit resets, toggles Remote Control and sends push notifications to your phone for the events you choose; side panel with status, countdown, limit bars and stats",
+  "version": "0.3.0",
+  "description": "Away from Claude (AFC): tools to develop while away from the PC. AFK mode (keeps the PC awake, safe auto-permissions), a work queue planned with you and run while you are away, auto-resume when a usage limit resets, Remote Control toggle and push notifications for the events you choose, an on-demand return report; side panel with status, countdown, limit bars and stats",
   "author": {
     "name": "Fazzini Pierluigi",
     "url": "https://github.com/fazzinipierluigi"
   },
   "license": "MIT",
-  "keywords": ["claude-code", "claude-code-mod", "rate-limit", "auto-resume", "remote-control", "push-notifications", "dashboard", "tui"],
-  "types": "./types/index.d.ts"
+  "keywords": ["claude-code", "claude-code-mod", "afk", "work-queue", "rate-limit", "auto-resume", "remote-control", "push-notifications", "dashboard", "tui"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "afkAmmessi": {
+      "type": "string",
+      "title": "AFK: extra allowed commands",
+      "description": "Command prefixes Claude may run without asking while AFK mode is on, comma-separated (e.g. 'docker compose up, ./scripts/check.sh')",
+      "default": ""
+    },
+    "afkNegati": {
+      "type": "string",
+      "title": "AFK: extra denied commands",
+      "description": "Command prefixes always denied while AFK mode is on, comma-separated (e.g. 'npm run release, ./deploy.sh')",
+      "default": ""
+    },
+    "afkSpegniDopoMin": {
+      "type": "number",
+      "title": "AFK: keep-awake idle timeout (minutes)",
+      "description": "Minutes of inactivity (no turn, empty queue, no auto-resume wait) after which AFC stops keeping the PC awake",
+      "default": 30
+    }
+  }
 }

@@ -53,7 +53,7 @@ export type Statistiche = {
 }
 
 /** Ciò su cui si può essere avvisati sul telefono. */
-export type TipoAvviso = 'permesso' | 'domanda' | 'piano' | 'attesa' | 'finito' | 'limite' | 'ripresa' | 'errore'
+export type TipoAvviso = 'permesso' | 'domanda' | 'piano' | 'attesa' | 'finito' | 'limite' | 'ripresa' | 'errore' | 'coda'
 
 /** Impostazioni del controllo remoto, copia di $.store. */
 export type Remoto = {
@@ -80,6 +80,50 @@ export type UltimaPush = {
 /** Esito dell'ultimo comando dato al Remote Control. */
 export type StatoRemoto = { quando: number; ok: boolean; testo: string }
 
+/** Modalità AFK: sveglia del PC e permessi AFK. Solo per la sessione. */
+export type Afk = { attivo: boolean; da?: number }
+
+/** Il processo che tiene sveglio il PC. */
+export type Sveglia = { stato: 'spenta' | 'attiva' | 'errore' | 'non supportata'; testo?: string; da?: number }
+
+/** Un compito della coda di lavoro. */
+export type VoceCoda = {
+  id: string
+  obiettivo: string
+  stato: 'pianificazione' | 'pronto' | 'esecuzione' | 'fatto' | 'interrotto'
+  /** Flusso con cui è stato pianificato e verrà eseguito. */
+  via: 'superpowers' | 'interno'
+  /** Il file del piano, appena c'è. */
+  piano?: string
+  aggiunta: number
+  inizio?: number
+  fine?: number
+  /** Solleciti a continuare già mandati durante l'esecuzione. */
+  solleciti: number
+  nota?: string
+}
+
+/** La coda del progetto, copia di $.store. */
+export type Coda = { voci: VoceCoda[]; inCorso: boolean }
+
+/** Ciò che è successo da quando l'utente è via: la base del rapporto di rientro. */
+export type Diario = {
+  da: number
+  strumenti: number
+  file: string[]
+  negati: { quando: number; cosa: string; motivo: string }[]
+  errori: { quando: number; testo: string }[]
+  limiti: number
+  riprese: number
+  push: number
+  completati: string[]
+  interrotti: string[]
+  costoInizio?: number
+}
+
+/** Il rapporto di rientro: in preparazione, pronto (in chat) o fallito. */
+export type Rapporto = { stato: 'preparazione' | 'pronto' | 'errore'; quando: number; testo?: string }
+
 declare module 'claude-code' {
   interface PluginState {
     'afc': {
@@ -93,6 +137,15 @@ declare module 'claude-code' {
       remoto: Shaped<Remoto>
       ultimaPush: Shaped<UltimaPush | null>
       statoRemoto: Shaped<StatoRemoto | null>
+      afk: Shaped<Afk>
+      sveglia: Shaped<Sveglia>
+      coda: Shaped<Coda>
+      diario: Shaped<Diario>
+      rapporto: Shaped<Rapporto | null>
+      /** Un turno della sessione principale è in corso. */
+      inTurno: Shaped<boolean>
+      /** Ultima attività vista (turno, strumento): misura l'inattività per la sveglia. */
+      ultimaAttivita: Shaped<number>
     }
   }
 }
