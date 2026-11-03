@@ -1,0 +1,12 @@
+{
+  "name": "afc",
+  "version": "0.2.0",
+  "description": "Away from Claude (AFC): tools to develop while away from the PC. Auto-resumes the session when a usage limit resets, toggles Remote Control and sends push notifications to your phone for the events you choose; side panel with status, countdown, limit bars and stats",
+  "author": {
+    "name": "Fazzini Pierluigi",
+    "url": "https://github.com/fazzinipierluigi"
+  },
+  "license": "MIT",
+  "keywords": ["claude-code", "claude-code-mod", "rate-limit", "auto-resume", "remote-control", "push-notifications", "dashboard", "tui"],
+  "types": "./types/index.d.ts"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "afc",
+  "description": "AFC · Away from Claude: tools to keep developing with Claude Code while you are away from the PC",
+  "owner": { "name": "Fazzini Pierluigi", "url": "https://github.com/fazzinipierluigi" },
+  "plugins": [
+    {
+      "name": "afc",
+      "source": "./",
+      "description": "AFC · Away from Claude: auto-resume after usage limits, Remote Control toggle and configurable push notifications to your phone, with a live side panel"
+    }
+  ]
+}
